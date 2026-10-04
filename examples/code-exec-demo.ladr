@@ -1,0 +1,37 @@
+# code-exec-demo.ladr
+# A minimal ladder exercising tools.codeExecution (mid-reasoning code execution).
+# Also exercises federated execution automatically when the engine runs with
+# LADR_CODE_EXECUTION=federated — the code runs on the user's connected device
+# instead of the server. Safe default that tests the tool path end to end.
+name: code-exec-demo
+description: Verify an arithmetic claim by running code mid-reasoning.
+allowedTargets: { strategy: universal }
+exit: answer
+
+steps:
+  - id: verify
+    type: normal
+    fields:
+      - { name: Claim, type: text, from: input.context }
+    codeExecution:
+      maxRounds: 3
+      runtime: python
+      as: ComputedResult
+      requestMatch:
+        type: object
+        properties:
+          code: { type: string }
+    systemPrompt: |
+      Verify the Claim. Emit {"code": "..."} to run python and check it
+      numerically. The result comes back as ComputedResult. Then state
+      VERIFIED or REFUTED in prose.
+
+    maxTokens: 65536
+  - id: answer
+    type: normal
+    fields:
+      - { name: Verdict, type: ingest, from: { stepId: verify } }
+    systemPrompt: "Return the verdict as-is: {Verdict}"
+
+    maxTokens: 65536
+knobs: {}

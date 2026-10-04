@@ -1,0 +1,260 @@
+# project-context-keeper.ladr
+#
+# A persistent project context manager built on the principle that completion
+# is prediction, not execution. Each cognitive task is a SEPARATE LLM call:
+#
+#   orient → plan → execute → verify → reflect
+#
+# No step does two jobs. No step predicts what a later step should produce.
+# Each step receives prior steps' ACTUAL outputs as fields, not predictions.
+# The verify step has codeExecution — it FORCES real checking, not prose
+# that sounds like checking.
+#
+# The relik persists everything across calls. The next session starts with
+# the accumulated results of every prior session, not a blank relik.
+
+name: project-context-keeper
+knobs: {}
+description: >
+  Persistent project context manager with enforced decomposition. Each call:
+  orient (read context) → plan (decide approach) → execute (do the work) →
+  verify (check with tools) → reflect (persist to memory). One job per step.
+
+allowedTargets: { strategy: universal }
+
+reliks:
+  - title: ProjectContext
+    folders:
+      - name: state
+        tokenLimit: 2000
+        access: readWrite
+        evictionPolicy: reject
+        files:
+          - { name: current-state, init: blank }
+          - { name: pending-tasks, init: blank }
+
+      - name: decisions
+        tokenLimit: 2000
+        access: readWrite
+        evictionPolicy: FIFO
+        files:
+          - { name: architectural, init: blank }
+          - { name: lessons-learned, init: blank }
+
+      - name: reference
+        tokenLimit: 3000
+        access: readWrite
+        evictionPolicy: LRU
+        files:
+          - { name: key-files, init: blank }
+          - { name: patterns, init: blank }
+
+exit: reflect
+
+steps:
+  # ── Step 1: Orient ── ONE JOB: read and understand where the project is.
+  # Does NOT plan or execute. Just loads context and acknowledges it.
+  #
+  - id: orient
+    type: normal
+    fields:
+      - name: CurrentState
+        type: relikRead
+        from: { relik: ProjectContext, folder: state, file: current-state }
+      - name: PendingTasks
+        type: relikRead
+        from: { relik: ProjectContext, folder: state, file: pending-tasks }
+      - name: ArchitecturalDecisions
+        type: relikRead
+        from: { relik: ProjectContext, folder: decisions, file: architectural }
+      - name: LessonsLearned
+        type: relikRead
+        from: { relik: ProjectContext, folder: decisions, file: lessons-learned }
+      - name: KeyFiles
+        type: relikRead
+        from: { relik: ProjectContext, folder: reference, file: key-files }
+      - name: Patterns
+        type: relikRead
+        from: { relik: ProjectContext, folder: reference, file: patterns }
+      - name: Task
+        type: text
+        from: input.context
+    systemPrompt: |
+      You are a persistent project assistant beginning a new session.
+
+      Below is the accumulated context from ALL prior sessions. Your ONLY
+      job right now is to orient yourself — understand where the project
+      stands, what has been decided, what mistakes have been made.
+
+      DO NOT plan or execute yet. Just demonstrate that you understand the
+      current state by summarizing:
+      1. What the project is right now (2-3 sentences)
+      2. What decisions are already locked in (bullet list)
+      3. What mistakes must not be repeated (bullet list)
+      4. What the incoming task is asking you to do
+
+      This is the orientation step. The next step will plan the approach.
+      Your output here becomes the planning step's input.
+
+  # ── Step 2: Plan ── ONE JOB: decide HOW to approach the task.
+  # Has the orient step's actual summary as input. Does NOT execute.
+  #
+  - id: plan
+    type: normal
+    fields:
+      - name: Orientation
+        type: ingest
+        from: { stepId: orient, loopRef: current }
+      - name: Task
+        type: text
+        from: input.context
+    systemPrompt: |
+      Based on the orientation summary above, plan your approach to the task.
+
+      Your ONLY job is to decide HOW you will tackle this. Output:
+      1. What specifically needs to be done (decompose the task)
+      2. What files or systems are involved
+      3. What could go wrong (pre-mortem)
+      4. How you will verify the work is correct
+
+      DO NOT execute yet. This is the planning step. The next step will
+      receive your plan and execute against it.
+
+      Apply this principle: before trusting any assumption, ask "if I were
+      wrong, what would I see?" Then note what to check.
+
+  # ── Step 3: Execute ── ONE JOB: do the actual work.
+  # Has the plan as input. Can use relikRetrieve to pull additional context.
+  # Does NOT self-verify — that's the next step's job.
+  #
+  - id: execute
+    type: normal
+    fields:
+      - name: Plan
+        type: ingest
+        from: { stepId: plan, loopRef: current }
+    relikRead:
+      maxRounds: 5
+      from: { relik: ProjectContext, folder: reference }
+      as: RetrievedReference
+      requestMatch:
+        type: object
+        properties:
+          request:
+            type: object
+            properties:
+              files: { type: array, items: { type: string } }
+              metatag: { type: object }
+    systemPrompt: |
+      Execute the plan from the previous step. This is the execution step —
+      your ONE job is to do the work.
+
+      Use relikRetrieve if you need to reference accumulated project knowledge.
+
+      When you have completed the work, output a summary of what you did
+      and what you produced. Do NOT claim it is verified — verification is
+      the next step's job. Just report what you did, honestly.
+
+  # ── Step 4: Verify ── ONE JOB: check that the execution is correct.
+  # This step is what creates ENFORCEMENT. It can't be skipped or blended
+  # into execution because it's a separate LLM call that sees the execution
+  # output as input and must produce its own assessment.
+  #
+  # Without this step, the LLM would predict "the work is correct" as part
+  # of the execution step's completion. With this step, it must actually
+  # examine the work in a fresh call that has one job: find what's wrong.
+  #
+  - id: verify
+    type: normal
+    fields:
+      - name: WorkSummary
+        type: ingest
+        from: { stepId: execute, loopRef: current }
+      - name: Plan
+        type: ingest
+        from: { stepId: plan, loopRef: current }
+    codeExecution:
+      maxRounds: 8
+      runtime: bash
+      as: Evidence
+      requestMatch:
+        type: object
+        properties:
+          code: { type: string }
+          language: { type: string, enum: [bash, python, node] }
+    systemPrompt: |
+      Your ONE job: verify the work from the execution step against the plan.
+
+      For each item in the plan, RUN CODE that checks it. Do not reason about
+      whether it's correct — run a command that produces factual evidence.
+
+      For each planned item:
+      1. What command would PROVE this was done? Run it.
+      2. What command would PROVE this was done CORRECTLY? Run it.
+      3. What command would reveal a PROBLEM? Run it.
+
+      Emit code calls (matching the schema) to stay in the loop. Only output
+      prose when you have evidence for every planned item.
+
+      Examples:
+      - "Added function X to file Y" → {"code": "grep -n 'func X' Y", "language": "bash"}
+      - "Tests pass" → {"code": "cd backend && go test ./... 2>&1", "language": "bash"}
+      - "Config validates" → {"code": "cat config.yaml | python3 -c 'import yaml,sys; yaml.safe_load(sys.stdin)'", "language": "bash"}
+
+      After evidence is collected, output your verdict:
+      VERIFIED: [list what was confirmed, citing specific command output]
+      FAILED: [list gaps, citing what was expected vs found]
+      PARTIAL: [list what passed and what failed]
+
+      A false VERIFIED is worse than FAILED — it hides problems that compound.
+
+  # ── Step 5: Reflect ── ONE JOB: persist what changed.
+  # Has the verification result as input. Uses relikEdit to update memory.
+  # This is a separate step from verify because writing to memory while
+  # still in "verification mode" would blend the two cognitive tasks.
+  #
+  - id: reflect
+    type: normal
+    fields:
+      - name: VerificationResult
+        type: ingest
+        from: { stepId: verify, loopRef: current }
+      - name: WorkSummary
+        type: ingest
+        from: { stepId: execute, loopRef: current }
+      - name: CurrentState
+        type: relikRead
+        from: { relik: ProjectContext, folder: state, file: current-state }
+      - name: PendingTasks
+        type: relikRead
+        from: { relik: ProjectContext, folder: state, file: pending-tasks }
+      - name: LessonsLearned
+        type: relikRead
+        from: { relik: ProjectContext, folder: decisions, file: lessons-learned }
+    relikEdit:
+      maxRounds: 4
+      to: { relik: ProjectContext, folder: state }
+      as: StateEditReceipt
+      requestMatch:
+        type: object
+        properties:
+          edit:
+            type: object
+            properties:
+              file: { type: string }
+              ops: { type: array }
+    systemPrompt: |
+      The verification step has completed. Your ONE job: persist what changed.
+
+      Update the project state files using surgical edits:
+      1. current-state — what is the state of the project NOW, after this
+         session? Include the verification result.
+      2. pending-tasks — what's left to do? Update based on what was
+         accomplished and what gaps the verification found.
+
+      The next session will read what you write here. Be precise. Be honest
+      about failures — they're more valuable to future sessions than false
+      successes.
+
+      If you learned a NEW lesson this session, you will have the chance to
+      persist it in the next step. For now, focus on state and tasks.

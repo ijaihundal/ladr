@@ -1,0 +1,181 @@
+# claim-verifier.ladr
+#
+# The verification enforcement ladder. Takes any claim, decomposes it into
+# atomic testable assertions, runs ACTUAL code to check each one, and outputs
+# structured results with evidence.
+#
+# This is the ladder that would have caught "v0.1 complete" being unverified.
+# It doesn't ask the LLM "does this look right?" — it FORCES the LLM to run
+# commands that produce factual output, then reports what the output says.
+#
+# The codeExecution tool runs in a persistent local interpreter session on
+# your machine (see the CLI's --sessions-dir); hosted deployments can route
+# it to a connected device instead.
+#
+# Usage: input.context = the claim to verify. Example:
+#   "The OAuth token route uses a fresh Redis client, not the pool"
+
+name: claim-verifier
+knobs: {}
+description: >
+  Forces claim verification through code execution. Decomposes a claim into
+  testable assertions, runs actual commands against each, outputs structured
+  VERIFIED/FAILED results with evidence. No assertion is trusted without
+  tool-produced evidence.
+
+allowedTargets: { strategy: universal }
+
+reliks:
+  - title: VerificationLog
+    folders:
+      - name: results
+        tokenLimit: 5000
+        access: readWrite
+        evictionPolicy: FIFO
+        files:
+          - { name: latest, init: blank }
+
+exit: persist
+
+steps:
+  # ── Step 1: Decompose ──
+  # ONE JOB: break the claim into atomic assertions that can be checked
+  # by running commands, not by reasoning.
+  #
+  - id: decompose
+    type: normal
+    fields:
+      - name: Claim
+        type: text
+        from: input.context
+    systemPrompt: |
+      Break the following claim into atomic, independently testable assertions.
+
+      Rules:
+      - Each assertion must be checkable by READING A FILE, RUNNING A COMMAND,
+        or INSPECTING STATE — not by reasoning about plausibility.
+      - "The function exists" → testable (grep for it)
+      - "The function is called" → testable (grep for call sites)
+      - "The system is production-ready" → NOT testable, break it further
+      - Aim for 3-8 assertions. Too few = not thorough. Too many = loses focus.
+
+      Output format (one per line):
+      1. [assertion] — verify by: [specific command or file to check]
+      2. [assertion] — verify by: [specific command or file to check]
+
+  # ── Step 2: Verify ──
+  # ONE JOB: run actual code that checks each assertion.
+  # The codeExecution tool + requestMatch create pressure: the LLM must emit
+  # code calls (matching the schema) to stay in the loop. Only non-matching
+  # output (prose) ends the step. maxRounds gives enough budget to check
+  # every assertion.
+  #
+  - id: verify
+    type: normal
+    fields:
+      - name: Assertions
+        type: ingest
+        from: { stepId: decompose, loopRef: current }
+    codeExecution:
+      maxRounds: 10
+      runtime: bash
+      as: Evidence
+      requestMatch:
+        type: object
+        properties:
+          code: { type: string }
+          language: { type: string, enum: [bash, python, node] }
+    systemPrompt: |
+      You have a list of assertions to verify. Your ONLY job is to run code
+      that produces FACTUAL EVIDENCE for each one.
+
+      For each assertion, emit a code call:
+      {"code": "grep -n 'getRedisUrl' apps/web/app/api/oauth/token/route.ts", "language": "bash"}
+
+      The code runs in a real container. Its output IS the evidence:
+      - Matching output → assertion has support
+      - Empty output → assertion likely FALSE
+      - Error → assertion COULD NOT BE CHECKED (report this honestly)
+
+      Rules:
+      - ONE assertion per code call. Don't batch.
+      - Use the simplest command that answers the question: grep, cat, test,
+        find, ls, wc. Don't over-engineer.
+      - After each result, decide: do I have enough evidence? If not, run
+        another command targeting the same assertion from a different angle.
+      - DO NOT output prose until you have checked EVERY assertion or you
+        have hit the round limit. Prose ends the step — make it count.
+
+      When you have evidence for every assertion (or run out of rounds),
+      output a summary:
+      "Verification complete. [N] assertions checked, [M] with evidence."
+
+  # ── Step 3: Report ──
+  # ONE JOB: produce structured results from the evidence.
+  # This is a SEPARATE call from verify because producing a report while
+  # still in "run code" mode would blend two cognitive tasks.
+  #
+  - id: report
+    type: normal
+    fields:
+      - name: Assertions
+        type: ingest
+        from: { stepId: decompose, loopRef: current }
+      - name: Evidence
+        type: ingest
+        from: { stepId: verify, loopRef: current }
+    systemPrompt: |
+      Produce a verification report from the evidence.
+
+      For EACH assertion from the decomposition:
+      - State the assertion
+      - State the verdict: VERIFIED / FAILED / UNVERIFIED
+      - Cite the SPECIFIC evidence (command output) that supports the verdict
+      - If FAILED: state what was EXPECTED vs what was FOUND
+
+      Verdict definitions:
+      - VERIFIED: tool output directly confirms the assertion
+      - FAILED: tool output directly contradicts the assertion
+      - UNVERIFIED: no evidence was produced, or evidence was ambiguous
+
+      Be ruthless. "The output suggests it probably works" = UNVERIFIED.
+      "The output shows X on line Y" = VERIFIED or FAILED depending on X.
+
+      End with:
+      OVERALL: CLAIM VERIFIED / CLAIM FAILED / CLAIM PARTIAL
+      [If FAILED or PARTIAL: list the specific failures]
+
+  # ── Step 4: Persist ──
+  # ONE JOB: write the report to memory so the next session sees it.
+  #
+  - id: persist
+    type: normal
+    fields:
+      - name: Report
+        type: ingest
+        from: { stepId: report, loopRef: current }
+      - name: CurrentLog
+        type: relikRead
+        from: { relik: VerificationLog, folder: results, file: latest }
+    relikEdit:
+      maxRounds: 2
+      to: { relik: VerificationLog, folder: results }
+      as: EditReceipt
+      requestMatch:
+        type: object
+        properties:
+          edit:
+            type: object
+            properties:
+              file: { type: string }
+              ops: { type: array }
+    systemPrompt: |
+      Append the verification report to the results log. Use surgical edits.
+      The next session will read this file and know exactly what was verified
+      vs what was merely claimed.
+
+      Format each entry:
+      [timestamp]
+      CLAIM: [original claim]
+      VERDICT: [VERIFIED / FAILED / PARTIAL]
+      EVIDENCE: [key findings]

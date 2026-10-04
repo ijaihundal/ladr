@@ -1,0 +1,55 @@
+# memory-edit-demo.ladr
+# A ladder exercising tools.relikEdit — iterative, surgical editing of a memory
+# file with feedback. Each round the model sees a numbered view of the file and
+# emits precise edits; the engine returns an EditReceipt showing what applied.
+# Tests the version/hash provenance + atomic edit path end to end.
+name: memory-edit-demo
+knobs: {}
+description: Refine a draft note by editing it surgically across rounds.
+allowedTargets: { strategy: universal }
+exit: done
+
+reliks:
+  - title: Workspace
+    folders:
+      - name: drafts
+        tokenLimit: 800
+        files:
+          - name: note.md
+            init: |
+              Title: Untitled
+              Status: draft
+              Body: this is a rough first pass with a typo and a loose end.
+
+steps:
+  - id: edit
+    type: normal
+    fields:
+      - { name: Goal, type: text, from: input.context }
+      - { name: Note, type: relikRead, from: { relik: Workspace, folder: drafts, file: note.md } }
+    relikEdit:
+      maxRounds: 4
+      to: { relik: Workspace, folder: drafts }
+      as: EditReceipt
+      requestMatch:
+        type: object
+        properties:
+          edit:
+            type: object
+            properties:
+              file: { type: string }
+              ops: { type: array }
+    systemPrompt: |
+      Improve the note in drafts/note.md to satisfy the Goal. Each turn you see
+      the current file with line numbers as part of EditReceipt. Emit an edit:
+      {"edit": {"file": "note.md", "ops": [{"op": "replace", "anchor": "exact
+      existing text", "content": "new text"}]}}. Ops: replace, insertBefore,
+      insertAfter, delete (anchor-based) or lineReplace, lineDelete, lineInsert.
+      Edits are atomic. When the note is good, respond in prose.
+
+  - id: done
+
+    type: normal
+    fields:
+      - { name: Final, type: relikRead, from: { relik: Workspace, folder: drafts, file: note.md } }
+    systemPrompt: "Return the final note as-is."
