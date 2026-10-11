@@ -96,6 +96,7 @@ func ExecuteAdaptiveLoop(
 	currentFields := initialFields
 	var allRetrieved []RetrievedDoc // dedup across rounds for relikRead
 	dedup := map[string]bool{}
+	editApplied := false // set once a relikEdit call succeeds
 
 	for round := 1; round <= loopCfg.maxRounds; round++ {
 		userPrompt := AssemblePrompt(currentFields, effectiveSys)
@@ -107,6 +108,27 @@ func ExecuteAdaptiveLoop(
 		// Does the output match the shared requestMatch schema (→ tool call)?
 		matched, call, err := parseToolCall(output, loopCfg.requestMatch)
 		if err != nil || !matched {
+			// A relikEdit-declared step that has not applied its edit may not
+			// end here: a silent no-write step is how memory edits get lost.
+			// Give the model shape feedback and another round; past maxRounds,
+			// end the step loudly instead of passing for a final answer.
+			requireEdit := se == nil || se.RequireEdit == nil || *se.RequireEdit
+			if se != nil && requireEdit && !editApplied {
+				if round < loopCfg.maxRounds {
+					currentFields = append(currentFields, ResolvedField{Name: "ToolError",
+						Value: "(no edit has been applied yet — this step must emit an edit call per the relikEdit tool spec before any final answer; re-emit {\"edit\": {...}} now)"})
+					continue
+				}
+				_ = io.PublishEvent(ctx, PublishEventArgs{
+					InstanceID: runtime.InstanceID,
+					Type:       EventError,
+					Data: map[string]any{
+						"message":  "relikEdit: step ended without applying any edit (final output never matched the edit-call shape)",
+						"nonFatal": true,
+						"stepId":   stepID,
+					},
+				})
+			}
 			// Non-matching output = final answer. Done.
 			return output, nil
 		}
@@ -120,6 +142,9 @@ func ExecuteAdaptiveLoop(
 			injected, err = runRetrieveToolAdaptive(ctx, sr, call.Request, store, dedup, round, &allRetrieved)
 		case se != nil && len(call.Edit) > 0:
 			injected, err = runRelikEditToolAdaptive(ctx, se, call.Edit, store, runtime, stepID)
+			if err == nil {
+				editApplied = true
+			}
 		case fs != nil && (len(call.Read) > 0 || len(call.Write) > 0 || len(call.List) > 0):
 			injected, err = runFilesToolAdaptive(ctx, fs, call, io, runtime, stepID, groupID, nodeNumber)
 		case ced != nil && len(call.ConfigEdit) > 0:

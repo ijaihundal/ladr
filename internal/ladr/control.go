@@ -1,4 +1,4 @@
-// LADR - the programming layer for inference-time reasoning.
+// Redeo - the programming layer for inference-time reasoning.
 // Copyright (C) 2026  Redeo Labs Inc.
 //
 // This program is free software: you can redistribute it and/or modify

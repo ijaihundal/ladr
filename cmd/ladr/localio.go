@@ -103,6 +103,17 @@ func (io *localIO) finalTrail() string {
 	return strings.Join(io.events, "\n")
 }
 
+// Outputs returns a copy of all step outputs written this run (for -v dumps).
+func (io *localIO) Outputs() map[string]string {
+	io.mu.Lock()
+	defer io.mu.Unlock()
+	out := make(map[string]string, len(io.outputs))
+	for k, v := range io.outputs {
+		out[k] = v
+	}
+	return out
+}
+
 // ExecuteLlmCall runs the provider chain synchronously, first success wins —
 // same policy the worker applies over the queue.
 func (io *localIO) ExecuteLlmCall(ctx context.Context, a engine.ExecuteLlmParams) (string, error) {

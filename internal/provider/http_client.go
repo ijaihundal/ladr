@@ -119,6 +119,63 @@ func ProviderFetch(
 	return resp, nil
 }
 
+
+// ProviderFetchBytes performs the request and reads the FULL body inside the
+// timeout scope, then returns status + bytes. Use this for non-stream calls:
+// ProviderFetch's defer-cancel fires when it returns, and a body read after
+// return races a canceled context (large bodies reliably fail).
+func ProviderFetchBytes(
+	ctx context.Context,
+	providerName string,
+	url string,
+	method string,
+	headers map[string]string,
+	body []byte,
+	timeoutMs int,
+) (int, []byte, error) {
+	ms := GetProviderTimeoutMs(timeoutMs)
+	if ms <= 0 {
+		ms = defaultTimeoutMs
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(ms)*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, errors.NewProviderError(fmt.Sprintf("Network error: %s", err.Error()), errors.ProviderErrorOptions{
+			Provider:  providerName,
+			Retryable: true,
+		})
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return 0, nil, errors.NewProviderError("Request timed out", errors.ProviderErrorOptions{
+				Provider:  providerName,
+				IsTimeout: true,
+				Retryable: true,
+			})
+		}
+		return 0, nil, errors.NewProviderError(fmt.Sprintf("Network error: %s", err.Error()), errors.ProviderErrorOptions{
+			Provider:  providerName,
+			Retryable: true,
+		})
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(defaultMaxRespBytes)))
+	if err != nil {
+		return resp.StatusCode, nil, errors.NewProviderError(fmt.Sprintf("Body read: %s", err.Error()), errors.ProviderErrorOptions{
+			Provider:  providerName,
+			Retryable: true,
+		})
+	}
+	return resp.StatusCode, data, nil
+}
+
 // ProviderFetchStream performs an HTTP request for a streaming response.
 // The caller is responsible for closing the response body.
 func ProviderFetchStream(
@@ -134,10 +191,14 @@ func ProviderFetchStream(
 	if ms == 0 {
 		ms = defaultStreamTimeoutMs
 	}
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(ms)*time.Millisecond)
-	defer cancel()
+	// The request must NOT be tied to this function's lifetime: the caller
+	// reads resp.Body in its own goroutine AFTER return, and a canceled
+	// context kills that read (the empty-stream bug). Hard deadline is
+	// enforced by a watchdog below; idle timeout + byte cap live in the
+	// SSE parser.
+	reqCtx := context.WithoutCancel(ctx)
 
-	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(reqCtx, method, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, errors.NewProviderError(fmt.Sprintf("Network error: %s", err.Error()), errors.ProviderErrorOptions{
 			Provider:  providerName,
@@ -162,6 +223,10 @@ func ProviderFetchStream(
 			Retryable: true,
 		})
 	}
+
+	// Hard deadline for the whole stream: close the body at ms (idempotent;
+	// the SSE parser's own defer Body.Close and idle watchdog still apply).
+	time.AfterFunc(time.Duration(ms)*time.Millisecond, func() { resp.Body.Close() })
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		bodyBytes, _ := io.ReadAll(resp.Body)

@@ -46,6 +46,13 @@ type StepOutcome struct {
 	PassFields    []ladr.PassField // for OutcomeJump AND OutcomeHandoff: caller-supplied field overrides
 	Survivors     []int            // surviving node numbers (after per-node continue gate)
 	BestOutput    string           // best-so-far output (for graceful exit on ceiling exhaustion)
+
+	// GatePassed reports whether the gate's condition held for at least one
+	// node output (the then-branch fired). Survivors carries node NUMBERS,
+	// which unnumbered single-node steps never have — GatePassed is the
+	// number-agnostic signal. Without it, a passing gate on an unnumbered
+	// step was indistinguishable from a failing one.
+	GatePassed bool
 }
 
 // DispatchGate evaluates the step-level if/then/else after per-node pruning.
@@ -97,10 +104,15 @@ func DispatchGate(
 		}
 	}
 
-	// Step-level action.
-	if len(survivors) > 0 {
+	// Step-level action. The decision keys on survivorOutputs, not survivors:
+	// a single unnumbered node (steps without explicit nodes:) never
+	// contributes a node number, so a survivors-only check fired the else
+	// action on gates that actually passed.
+	if len(survivorOutputs) > 0 {
 		// Survivors exist → fire then action.
-		return resolveAction(ifBlock.Then, survivors, survivorOutputs)
+		outcome := resolveAction(ifBlock.Then, survivors, survivorOutputs)
+		outcome.GatePassed = true
+		return outcome
 	}
 
 	// No survivors → fire else action.

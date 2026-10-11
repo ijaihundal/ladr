@@ -24,6 +24,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/ladr/ladr/internal/ladr"
 	"github.com/ladr/ladr/internal/mailbox"
@@ -191,9 +192,11 @@ func LoadDynamicStep(
 		return nil, fmt.Errorf("dynamic step %q: resolved config is empty", step.ID)
 	}
 
-	// 2. Parse as JSON.
+	// 2. Parse as JSON. Planners wrap their config in markdown fences or
+	// prose reflexively; extract the first balanced JSON object before
+	// unmarshalling (same tolerance the jsonMatches gate applies to outputs).
 	var cfg ladr.DynamicStepConfig
-	if err := json.Unmarshal([]byte(rawConfig), &cfg); err != nil {
+	if err := json.Unmarshal([]byte(extractJSONObject(rawConfig)), &cfg); err != nil {
 		return nil, fmt.Errorf("dynamic step %q: invalid JSON config: %w", step.ID, err)
 	}
 
@@ -267,4 +270,40 @@ func validateDynamicFieldReferences(cfg *ladr.DynamicStepConfig, manifest *Manif
 	}
 
 	return nil
+}
+
+// extractJSONObject returns the first balanced top-level JSON object in s,
+// ignoring ``` fences and any surrounding prose. Falls back to the trimmed
+// input when no object is found (the caller surfaces the parse error).
+func extractJSONObject(s string) string {
+	start := -1
+	depth := 0
+	inStr := false
+	esc := false
+	for i, r := range s {
+		if esc {
+			esc = false
+			continue
+		}
+		switch {
+		case r == '\\' && inStr:
+			esc = true
+		case r == '"':
+			inStr = !inStr
+		case inStr:
+		case r == '{':
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		case r == '}':
+			if depth > 0 {
+				depth--
+				if depth == 0 && start >= 0 {
+					return s[start : i+1]
+				}
+			}
+		}
+	}
+	return strings.TrimSpace(s)
 }

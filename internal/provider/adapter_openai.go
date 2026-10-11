@@ -176,23 +176,21 @@ func (a *openAiCompatibleAdapter) Call(ctx context.Context, model string, messag
 	bodyBytes, _ := json.Marshal(body)
 
 	url := trimTrailingSlash(baseURL) + "/chat/completions"
-	resp, err := ProviderFetch(ctx, a.name, url, "POST", map[string]string{
+	status, respBody, err := ProviderFetchBytes(ctx, a.name, url, "POST", map[string]string{
 		"content-type":  "application/json",
 		"authorization": "Bearer " + config.APIKey,
 	}, bodyBytes, config.TimeoutMs)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
+	if status < 200 || status >= 300 {
 		return nil, errors.NewProviderError(
-			fmt.Sprintf("%s call failed (%d): %s", a.name, resp.StatusCode, string(respBody)),
+			fmt.Sprintf("%s call failed (%d): %s", a.name, status, string(respBody)),
 			errors.ProviderErrorOptions{
 				Provider:   a.name,
-				StatusCode: resp.StatusCode,
-				Retryable:  IsRetryableHttpStatus(resp.StatusCode),
+				StatusCode: status,
+				Retryable:  IsRetryableHttpStatus(status),
 			},
 		)
 	}
@@ -208,7 +206,7 @@ func (a *openAiCompatibleAdapter) Call(ctx context.Context, model string, messag
 			CompletionTokens *int `json:"completion_tokens"`
 		} `json:"usage"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(respBody, &payload); err != nil {
 		return nil, errors.NewProviderError(fmt.Sprintf("Failed to parse response: %s", err.Error()), errors.ProviderErrorOptions{
 			Provider: a.name,
 		})
@@ -277,6 +275,18 @@ func (a *openAiCompatibleAdapter) Stream(ctx context.Context, model string, mess
 	}, bodyBytes, config.TimeoutMs)
 	if err != nil {
 		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		resp.Body.Close()
+		return nil, errors.NewProviderError(
+			fmt.Sprintf("%s stream call failed (%d): %s", a.name, resp.StatusCode, string(b)),
+			errors.ProviderErrorOptions{
+				Provider:   a.name,
+				StatusCode: resp.StatusCode,
+				Retryable:  IsRetryableHttpStatus(resp.StatusCode),
+			},
+		)
 	}
 
 	return ParseOpenAiSSEStream(resp, 0), nil

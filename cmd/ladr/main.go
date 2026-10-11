@@ -138,17 +138,40 @@ func runRun(args []string) error {
 	sessionsFlag := fs.String("sessions-dir", "", "persistent interpreter sessions dir")
 	timeout := fs.Duration("timeout", 10*time.Minute, "overall timeout")
 	verbose := fs.Bool("v", false, "print engine events to stderr")
-	fs.Parse(args)
+	// Go's flag package stops at the first positional, which would silently
+	// drop every flag typed after the file (`ladr run x.ladr --input k=v -v`).
+	// Hoist the file out, drop the pair-style flags (re-read below), and
+	// parse the rest.
+	file := ""
+	flagArgs := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !strings.HasPrefix(a, "-") && file == "" {
+			file = a
+			continue
+		}
+		if a == "--input" || a == "--knob" {
+			i++ // skip the pair's value too; collectPairs re-reads raw args
+			continue
+		}
+		if strings.HasPrefix(a, "--input=") || strings.HasPrefix(a, "--knob=") {
+			continue
+		}
+		flagArgs = append(flagArgs, a)
+	}
+	fs.Parse(flagArgs)
 
-	if fs.NArg() < 1 {
+	if file == "" {
 		return fmt.Errorf("usage: ladr run <file.ladr> [--input k=v ...]")
 	}
-	path := fs.Arg(0)
+	path := file
 
 	inputs := map[string]any{}
 	for _, kv := range collectPairs(args, "--input") {
 		if i := strings.Index(kv, "="); i > 0 {
-			inputs[kv[:i]] = kv[i+1:]
+			// Engine input keys are namespaced (from.go: "input.context",
+			// "input.systemTime"); --input topic=x feeds input.topic.
+			inputs["input."+kv[:i]] = kv[i+1:]
 		}
 	}
 	knobs := map[string]float64{}
@@ -160,6 +183,9 @@ func runRun(args []string) error {
 			}
 			knobs[kv[:i]] = v
 		}
+	}
+	if *verbose {
+		fmt.Fprintf(os.Stderr, "· inputs=%v knobs=%v\n", inputs, knobs)
 	}
 
 	cfg, _, err := loadConfig(path)
@@ -228,6 +254,15 @@ func runRun(args []string) error {
 	if !strings.HasSuffix(result, "\n") {
 		fmt.Println()
 	}
+	if *verbose {
+		for k, v := range io.Outputs() {
+			preview := v
+			if len(preview) > 120 {
+				preview = preview[:120] + "…"
+			}
+			fmt.Fprintf(os.Stderr, "· output %s = %q\n", k, preview)
+		}
+	}
 	return nil
 }
 
@@ -294,10 +329,11 @@ func resolveProvider(providerFlag, modelFlag string, maxTokens int) (engine.Prov
 			return engine.ProviderConfig{}, fmt.Errorf("LADR_PROVIDER=custom requires LADR_BASE_URL")
 		}
 		return engine.ProviderConfig{
-			Provider: "custom",
-			Model:    firstNonEmpty(modelFlag, os.Getenv("LADR_MODEL")),
-			APIKey:   key,
-			BaseURL:  base,
+			Provider:  "custom",
+			Model:     firstNonEmpty(modelFlag, os.Getenv("LADR_MODEL")),
+			APIKey:    key,
+			BaseURL:   base,
+			MaxTokens: maxTokens,
 		}, nil
 	}
 

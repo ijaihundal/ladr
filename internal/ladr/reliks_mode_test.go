@@ -1,4 +1,4 @@
-// LADR - the programming layer for inference-time reasoning.
+// Redeo - the programming layer for inference-time reasoning.
 // Copyright (C) 2026  Redeo Labs Inc.
 //
 // This program is free software: you can redistribute it and/or modify
@@ -56,12 +56,13 @@ func TestRelikModeUnknownInvalid(t *testing.T) {
 	]`), `invalid mode "borrow"`)
 }
 
+
 // --- indexer config + indexSearch validation ---------------------------------
 
 func indexerConfig(indexer string, fields string) string {
-	return `{"name":"T","allowedTargets":{"strategy":"universal"},"exit":"go","knobs":{},` +
-		`"steps":[{"id":"go","name":"go","type":"normal","systemPrompt":"x","fields":[` + fields + `]}],` +
-		`"indexer":` + indexer + `}`
+	return fmt.Sprintf(`{"name":"T","allowedTargets":{"strategy":"universal"},"exit":"go","knobs":{},`+
+		`"steps":[{"id":"go","name":"go","type":"normal","systemPrompt":"x","fields":[%s]}],`+
+		`"indexer":%s}`, fields, indexer)
 }
 
 func TestIndexSearchFieldValid(t *testing.T) {

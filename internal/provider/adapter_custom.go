@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"strings"
 
 	"github.com/ladr/ladr/pkg/errors"
@@ -71,23 +70,21 @@ func (a *customAdapter) Call(ctx context.Context, model string, messages []Messa
 	bodyBytes, _ := json.Marshal(body)
 
 	url := baseURL + "/chat/completions"
-	resp, err := ProviderFetch(ctx, "custom", url, "POST", map[string]string{
+	status, respBody, err := ProviderFetchBytes(ctx, "custom", url, "POST", map[string]string{
 		"content-type":  "application/json",
 		"authorization": "Bearer " + config.APIKey,
 	}, bodyBytes, config.TimeoutMs)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
+	if status < 200 || status >= 300 {
 		return nil, errors.NewProviderError(
-			fmt.Sprintf("Custom provider call failed (%d): %s", resp.StatusCode, string(respBody)),
+			fmt.Sprintf("Custom provider call failed (%d): %s", status, string(respBody)),
 			errors.ProviderErrorOptions{
 				Provider:   "custom",
-				StatusCode: resp.StatusCode,
-				Retryable:  IsRetryableHttpStatus(resp.StatusCode),
+				StatusCode: status,
+				Retryable:  IsRetryableHttpStatus(status),
 			},
 		)
 	}
@@ -103,7 +100,7 @@ func (a *customAdapter) Call(ctx context.Context, model string, messages []Messa
 			CompletionTokens *int `json:"completion_tokens"`
 		} `json:"usage"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(respBody, &payload); err != nil {
 		return nil, errors.NewProviderError(fmt.Sprintf("Failed to parse response: %s", err.Error()), errors.ProviderErrorOptions{
 			Provider: "custom",
 		})

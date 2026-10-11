@@ -1,4 +1,4 @@
-// LADR - the programming layer for inference-time reasoning.
+// Redeo - the programming layer for inference-time reasoning.
 // Copyright (C) 2026  Redeo Labs Inc.
 //
 // This program is free software: you can redistribute it and/or modify
@@ -333,6 +333,30 @@ func (f FieldSourceRef) MarshalJSON() ([]byte, error) {
 	return json.Marshal(m)
 }
 
+// UnmarshalJSON defaults an ABSENT loopRef to "current". Resolution treats
+// the zero LoopRef as unresolvable (a step source that reads nothing), so a
+// naturally-written `from: { stepId: x }` would silently yield an empty
+// field — the parser owns the authoring-friendly default instead. A present
+// loopRef keeps its parsed value (legacy stored rows carry "loopRef": ""
+// and must round-trip as unset, per TestLoopRefEmptyStringRoundTrip).
+func (f *FieldSourceRef) UnmarshalJSON(data []byte) error {
+	type shadow FieldSourceRef
+	var s shadow
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	*f = FieldSourceRef(s)
+	if f.LoopRef.IsZero() {
+		var probe struct {
+			LoopRef json.RawMessage `json:"loopRef"`
+		}
+		if err := json.Unmarshal(data, &probe); err == nil && probe.LoopRef == nil {
+			f.LoopRef = LoopRef{Kind: LoopRefString, Str: "current"}
+		}
+	}
+	return nil
+}
+
 // TextField references a free-form text source by string key.
 type TextField struct {
 	Name string `json:"name"`
@@ -360,6 +384,41 @@ type MultiIngestField struct {
 	Name string           `json:"name"`
 	Type string           `json:"type"` // "multi_ingest"
 	From []FieldSourceRef `json:"from"`
+}
+
+// UnmarshalJSON accepts from: as a single source object or an array of
+// them — `from: {stepId: x}` is the natural way to write one source, and a
+// config that uses it must not die at parse with a misleading element error.
+// (A published deliberation ladder carried the object form and was
+// unparseable until this was tolerated.) The other fields are decoded via a
+// tag-carrying but From-less shadow struct: a type alias would keep the
+// json tags and re-parse from: against the array type — the very recursion
+// this unmarshaler exists to break.
+func (m *MultiIngestField) UnmarshalJSON(data []byte) error {
+	var probe struct {
+		From json.RawMessage `json:"from"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return err
+	}
+	var head struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(data, &head); err != nil {
+		return err
+	}
+	var arr []FieldSourceRef
+	if err := json.Unmarshal(probe.From, &arr); err == nil {
+		m.Name, m.Type, m.From = head.Name, head.Type, arr
+		return nil
+	}
+	var single FieldSourceRef
+	if err := json.Unmarshal(probe.From, &single); err != nil {
+		return fmt.Errorf("multi_ingest from: expected a source object or array of them: %w", err)
+	}
+	m.Name, m.Type, m.From = head.Name, head.Type, []FieldSourceRef{single}
+	return nil
 }
 
 // NodeInfoField injects runtime node metadata.
@@ -638,12 +697,15 @@ func (fc *FieldsConfig) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	var fields []Field
-	if err := json.Unmarshal(data, &fields); err == nil {
-		fc.IsString = false
-		fc.Fields = fields
-		return nil
+	if err := json.Unmarshal(data, &fields); err != nil {
+		// Wrap, never swallow: a bad FIELD ELEMENT once surfaced as
+		// "fields: expected string or array", sending the author hunting
+		// for a shape problem that did not exist.
+		return fmt.Errorf("fields: %w", err)
 	}
-	return fmt.Errorf("fields: expected string or array")
+	fc.IsString = false
+	fc.Fields = fields
+	return nil
 }
 
 // IsSet returns true if the FieldsConfig has any value assigned.
@@ -687,6 +749,16 @@ type BaseStep struct {
 	// an expensive ladder). Validated against the config's allowedTargets;
 	// the engine charges spend against the model actually used.
 	Model string `json:"model,omitempty"`
+
+	// Temperature, MaxTokens and TimeoutMs override the run-level sampling
+	// and wall-clock defaults for this step's LLM calls. Zero value = inherit
+	// platform defaults. Reasoning models need explicit maxTokens (their
+	// generations are long; a truncated thinker emits nothing) and fan-out
+	// stages want per-stage temperature (hot for decorrelation, cold for
+	// arbitration). Transport already exists via engineCfgToMap/worker.
+	Temperature *float64 `json:"temperature,omitempty"`
+	MaxTokens   *int     `json:"maxTokens,omitempty"`
+	TimeoutMs   *int     `json:"timeoutMs,omitempty"`
 
 	// Mail posts an envelope after the step completes — the declarative
 	// send side of agent-to-agent messaging. Payloads stay in reliks;
@@ -1093,6 +1165,24 @@ func unmarshalBase(data []byte, expectedType string, b *BaseStep) error {
 	}
 	if v, ok := m["model"]; ok {
 		_ = json.Unmarshal(v, &b.Model)
+	}
+	if v, ok := m["temperature"]; ok && string(v) != "null" {
+		var t float64
+		if err := json.Unmarshal(v, &t); err == nil {
+			b.Temperature = &t
+		}
+	}
+	if v, ok := m["maxTokens"]; ok && string(v) != "null" {
+		var n int
+		if err := json.Unmarshal(v, &n); err == nil {
+			b.MaxTokens = &n
+		}
+	}
+	if v, ok := m["timeoutMs"]; ok && string(v) != "null" {
+		var n int
+		if err := json.Unmarshal(v, &n); err == nil {
+			b.TimeoutMs = &n
+		}
 	}
 	if v, ok := m["continueIf"]; ok {
 		_ = json.Unmarshal(v, &b.ContinueIf)

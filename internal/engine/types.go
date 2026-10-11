@@ -171,6 +171,8 @@ type ExecuteCodeParams struct {
 	LadderID   string // ladder attribution (device-side per-ladder grant checks)
 	Cwd        string // requested working dir (a device-side granted root; "" → session default)
 
+	OwnerID string // device-routing key for federated execution (the instance owner)
+
 	// Terminal lifecycle (v2) — codeExecution IS terminal access. Terminal
 	// names the device-side terminal ("" → the ladder's default); Background
 	// starts a long-running command (immediate receipt, output accumulates in
@@ -398,6 +400,7 @@ type ExecutePipelineOptions struct {
 	Budget            *ResourceBudget
 	DebugMode         bool
 	ResumeFrom        *PausedPosition
+	PauseRequestCheck func() bool // external pause request; honored at step boundaries
 
 	// Phase 1 extensions.
 	RelikStore     relik.Store     // persistent memory (reliks)

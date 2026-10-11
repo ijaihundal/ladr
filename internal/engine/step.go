@@ -20,6 +20,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sync"
@@ -134,6 +135,22 @@ func executeNode(
 			BaseURL:  provider.BaseURL,
 		}
 		fallbackProviders = nil // a step-scoped model pin has no fallback chain
+	}
+
+	// Per-step sampling overrides: thinking models need explicit maxTokens
+	// (long reasoning chains truncate to nothing) and stages want distinct
+	// temperatures (hot fan-outs, cold arbitration). Applied after the model
+	// override so a step-scoped model pin keeps step-scoped sampling.
+	if base != nil {
+		if base.Temperature != nil {
+			provider.Temperature = *base.Temperature
+		}
+		if base.MaxTokens != nil {
+			provider.MaxTokens = *base.MaxTokens
+		}
+		if base.TimeoutMs != nil {
+			provider.TimeoutMs = *base.TimeoutMs
+		}
 	}
 
 	// makeLLMCall is the single counted, ceiling-checked LLM-call seam, shared by
@@ -439,13 +456,21 @@ func ExecuteSingleStep(
 		outcome := DispatchGate(base, nodeResults)
 
 		// Update nodeResults to only include survivors from DispatchGate.
+		// Numbered results are kept by survivor number; unnumbered results
+		// (single-node steps without explicit nodes:) are kept exactly when
+		// the gate passed — before GatePassed this filter wiped a passing
+		// step's only output.
 		survivorSet := make(map[int]bool)
 		for _, n := range outcome.Survivors {
 			survivorSet[n] = true
 		}
 		var filtered []nodeResult
 		for _, r := range nodeResults {
-			if r.NodeNumber != nil && survivorSet[*r.NodeNumber] {
+			if r.NodeNumber != nil {
+				if survivorSet[*r.NodeNumber] {
+					filtered = append(filtered, r)
+				}
+			} else if outcome.GatePassed {
 				filtered = append(filtered, r)
 			}
 		}
@@ -531,15 +556,29 @@ func ExecuteSingleStep(
 	if base.RelikWrite != nil && runtimeBase.RelikStore != nil {
 		we := NewWriteExecutor(runtimeBase.RelikStore)
 		if err := we.ApplyRelikWrite(combined, *base.RelikWrite); err != nil {
-			// Relik write failures are non-fatal — log but continue.
+			// Write failures are non-fatal — log but continue. No-ops are
+			// equally non-fatal but carry their own event so a silent
+			// "wrote nothing" is observable in the trace.
+			var noop *WriteNoOpError
+			msg := "relikWrite failed: " + err.Error()
+			if errors.As(err, &noop) {
+				msg = err.Error()
+			}
 			_ = io.PublishEvent(ctx, PublishEventArgs{
 				InstanceID: runtimeBase.InstanceID,
 				Type:       EventError,
-				Data:       map[string]any{"message": "relikWrite failed: " + err.Error(), "nonFatal": true},
+				Data:       map[string]any{"message": msg, "nonFatal": true, "stepId": step.ID(), "noOp": noop != nil},
+			})
+		} else {
+			_ = io.PublishEvent(ctx, PublishEventArgs{
+				InstanceID: runtimeBase.InstanceID,
+				Type:       EventToolResult,
+				Data:       map[string]any{"message": "relikWrite applied", "stepId": step.ID()},
 			})
 		}
 	}
 
+	
 	// Post-step mail send (if declared). The envelope addresses a ladder by
 	// program name; the run's owner scopes it. Failures are non-fatal — a
 	// dropped notice must not kill the run that produced it.

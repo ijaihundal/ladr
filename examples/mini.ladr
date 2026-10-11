@@ -1,0 +1,21 @@
+# mini.ladr — minimal two-step smoke test for the CLI (LLM call + ingest).
+name: mini
+description: One LLM step, one ingest step. Proves the rail end to end.
+allowedTargets: { strategy: universal }
+knobs: {}
+exit: answer
+
+steps:
+  - id: greet
+    type: normal
+    fields:
+      - { name: Topic, type: text, from: input.topic }
+    systemPrompt: |
+      Write exactly one vivid sentence about {Topic}. No preamble, no quotes.
+    maxTokens: 4096
+  - id: answer
+    type: normal
+    fields:
+      - { name: Line, type: ingest, from: { stepId: greet } }
+    systemPrompt: "Return the sentence as-is: {Line}"
+    maxTokens: 4096

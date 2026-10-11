@@ -1,4 +1,4 @@
-// LADR - the programming layer for inference-time reasoning.
+// Redeo - the programming layer for inference-time reasoning.
 // Copyright (C) 2026  Redeo Labs Inc.
 //
 // This program is free software: you can redistribute it and/or modify
@@ -165,6 +165,12 @@ type RelikEditConfig struct {
 
 	// Prompt, when set, replaces the engine's default usage instructions.
 	Prompt string `json:"prompt,omitempty"`
+
+	// RequireEdit, when explicitly false, allows the step to end without any
+	// edit call — for steps where "nothing to change" is a legal outcome
+	// (e.g. a prune step over an already-clean log). Default (nil/absent) is
+	// true: a relikEdit step that never applies an edit ends loudly.
+	RequireEdit *bool `json:"requireEdit,omitempty"`
 }
 
 // ConfigEditConfig is the configEdit: step key — the fifth adaptive tool.

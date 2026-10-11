@@ -27,6 +27,19 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// stepOutputForEvent carries a step's output in its step_complete event,
+// truncated: the full text can be huge, but what each step actually said
+// must be queryable after the run — forensics on an arbitration (did the
+// reading audit run? what did the sweep execute?) need the trail, and
+// nothing else persists it.
+func stepOutputForEvent(out string) (string, bool) {
+	const max = 4000
+	if len(out) <= max {
+		return out, false
+	}
+	return out[:max], true
+}
+
 // ExecutePipeline is the top-level pipeline orchestrator.
 // It loops over maxLoops, iterating steps (sequential or group/parallel),
 // handles resume from pause, abort via context, resolves exit step output,
@@ -135,12 +148,17 @@ func ExecutePipeline(ctx context.Context, opts ExecutePipelineOptions) (string, 
 
 	// checkPause returns PipelinePausedError if the engine should pause.
 	checkPause := func(loopIndex, stepIndex int, stepID string) error {
-		if !debugMode {
+		pauseRequested := opts.PauseRequestCheck != nil && opts.PauseRequestCheck()
+		if !debugMode && !pauseRequested {
 			return nil
 		}
-		should, err := io.ShouldPause(ctx, stepID)
-		if err != nil {
-			return err
+		should := pauseRequested
+		if !should {
+			var err error
+			should, err = io.ShouldPause(ctx, stepID)
+			if err != nil {
+				return err
+			}
 		}
 		if should {
 			pos := PausedPosition{
@@ -324,13 +342,16 @@ func ExecutePipeline(ctx context.Context, opts ExecutePipelineOptions) (string, 
 							}
 						}
 
+						outForEvent, truncated := stepOutputForEvent(output)
 						return io.PublishEvent(ctx2, PublishEventArgs{
 							InstanceID: runtimeCtx.InstanceID,
 							Type:       EventStepComplete,
 							Data: map[string]any{
-								"loopIndex": loopIndex,
-								"stepId":    child.ID(),
-								"groupId":   item.ID(),
+								"loopIndex":       loopIndex,
+								"stepId":          child.ID(),
+								"groupId":         item.ID(),
+								"output":          outForEvent,
+								"outputTruncated": truncated,
 							},
 						})
 					})
@@ -427,12 +448,15 @@ func ExecutePipeline(ctx context.Context, opts ExecutePipelineOptions) (string, 
 				runtimeCtx.LastStepID = item.ID()
 				runtimeCtx.LastStepOutput = recursiveOutput
 
+				outForEvent, truncated := stepOutputForEvent(recursiveOutput)
 				if err := io.PublishEvent(ctx, PublishEventArgs{
 					InstanceID: runtimeCtx.InstanceID,
 					Type:       EventStepComplete,
 					Data: map[string]any{
-						"loopIndex": loopIndex,
-						"stepId":    item.ID(),
+						"loopIndex":       loopIndex,
+						"stepId":          item.ID(),
+						"output":          outForEvent,
+						"outputTruncated": truncated,
 					},
 				}); err != nil {
 					return "", deferFunc(err)

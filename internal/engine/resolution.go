@@ -568,6 +568,17 @@ func ResolveNodeCount(
 					return max(1, int(math.Floor(val))), nil
 				}
 			}
+			// Knob missing or non-finite: fall back to ONE node, but say so —
+			// a silent 1 here quietly serializes a fan-out ladder.
+			_ = io.PublishEvent(ctx, PublishEventArgs{
+				InstanceID: runtime.InstanceID,
+				Type:       EventNodeCountResolved,
+				Data: map[string]any{
+					"knob":     knobName,
+					"resolved": 1,
+					"fallback": "knob-not-found-or-nonfinite",
+				},
+			})
 			return 1, nil
 		}
 

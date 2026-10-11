@@ -1,4 +1,4 @@
-// LADR - the programming layer for inference-time reasoning.
+// Redeo - the programming layer for inference-time reasoning.
 // Copyright (C) 2026  Redeo Labs Inc.
 //
 // This program is free software: you can redistribute it and/or modify
@@ -296,6 +296,11 @@ func validateSchedule(config *PipelineConfig, errors *[]string) {
 		}
 	}
 }
+
+// cronParse/timeLoadLocation isolate the cron + tz deps for validation.
+func cronParse(spec string) (cron.Schedule, error) { return cron.ParseStandard(spec) }
+
+func timeLoadLocation(tz string) (*time.Location, error) { return time.LoadLocation(tz) }
 
 // 2. validateRelikReferences — relikRead fields reference valid targets
 // ---------------------------------------------------------------------------
@@ -1070,8 +1075,3 @@ func validateFallbackFromSpec(stepID, fieldLabel string, spec FromSpec, stepMap 
 		}
 	}
 }
-
-// cronParse/timeLoadLocation isolate the cron + tz deps for validation.
-func cronParse(spec string) (cron.Schedule, error) { return cron.ParseStandard(spec) }
-
-func timeLoadLocation(tz string) (*time.Location, error) { return time.LoadLocation(tz) }

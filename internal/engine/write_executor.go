@@ -38,8 +38,22 @@ func NewWriteExecutor(store relik.Store) *WriteExecutor {
 	return &WriteExecutor{store: store}
 }
 
+// WriteNoOpError reports a relikWrite that legitimately wrote nothing: the
+// step's output carried no valid payload for the declared schema. Writes are
+// opportunistic, so this is not a step failure — but it must be VISIBLE.
+// Every silent no-op here has already cost a night of debugging (episodes
+// that never appended, hinges "too long" that vanished without a trace).
+type WriteNoOpError struct {
+	Reason string
+}
+
+func (e *WriteNoOpError) Error() string {
+	return "relikWrite no-op: " + e.Reason
+}
+
 // ApplyRelikWrite extracts JSON from output, validates against the schema,
-// and writes to the relik if valid. Returns nil on no-match (no-op, not error).
+// and writes to the relik if valid. Returns a *WriteNoOpError (not nil) when
+// nothing was written, so callers can surface why.
 //
 // Steps:
 //  1. Extract first JSON block from output (ExtractJSONFromOutput).
@@ -54,14 +68,14 @@ func (we *WriteExecutor) ApplyRelikWrite(output string, sw ladr.RelikWrite) erro
 	// 1. Extract JSON.
 	rawJSON, err := ExtractJSONFromOutput(output)
 	if err != nil {
-		// No-match is no-op, not error.
-		return nil
+		// No-match is a no-op, not a step failure — but say so.
+		return &WriteNoOpError{Reason: "no JSON block found in output"}
 	}
 
 	var value any
 	if err := json.Unmarshal(rawJSON, &value); err != nil {
 		// Malformed JSON — no-op.
-		return nil
+		return &WriteNoOpError{Reason: "extracted JSON is malformed: " + err.Error()}
 	}
 
 	// 2. Validate against schema.
@@ -71,8 +85,8 @@ func (we *WriteExecutor) ApplyRelikWrite(output string, sw ladr.RelikWrite) erro
 	}
 
 	if err := ValidateAgainstJSONSchema(value, schema); err != nil {
-		// Validation failed — no-op (opportunistic write).
-		return nil
+		// Validation failed — no-op, with the reason the schema refused.
+		return &WriteNoOpError{Reason: "schema validation failed: " + err.Error()}
 	}
 
 	// 3. Extract field if specified.
@@ -81,7 +95,7 @@ func (we *WriteExecutor) ApplyRelikWrite(output string, sw ladr.RelikWrite) erro
 		extracted, err := extractField(value, sw.Field)
 		if err != nil {
 			// Field not found — no-op.
-			return nil
+			return &WriteNoOpError{Reason: err.Error()}
 		}
 		contentToWrite = extracted
 	}

@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 
 	"github.com/ladr/ladr/pkg/errors"
 )
@@ -176,23 +175,21 @@ func (a *googleAiStudioAdapter) Call(ctx context.Context, model string, messages
 	bodyBytes, _ := json.Marshal(payload)
 	url := trimTrailingSlash(endpointBase) + "/models/" + model + ":generateContent"
 
-	resp, err := ProviderFetch(ctx, "google_ai_studio", url, "POST", map[string]string{
+	status, respBody, err := ProviderFetchBytes(ctx, "google_ai_studio", url, "POST", map[string]string{
 		"content-type":   "application/json",
 		"x-goog-api-key": config.APIKey,
 	}, bodyBytes, config.TimeoutMs)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
+	if status < 200 || status >= 300 {
 		return nil, errors.NewProviderError(
-			fmt.Sprintf("google_ai_studio call failed (%d): %s", resp.StatusCode, string(respBody)),
+			fmt.Sprintf("google_ai_studio call failed (%d): %s", status, string(respBody)),
 			errors.ProviderErrorOptions{
 				Provider:   "google_ai_studio",
-				StatusCode: resp.StatusCode,
-				Retryable:  IsRetryableHttpStatus(resp.StatusCode),
+				StatusCode: status,
+				Retryable:  IsRetryableHttpStatus(status),
 			},
 		)
 	}
@@ -210,7 +207,7 @@ func (a *googleAiStudioAdapter) Call(ctx context.Context, model string, messages
 			CandidatesTokenCount *int `json:"candidatesTokenCount"`
 		} `json:"usageMetadata"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, errors.NewProviderError(fmt.Sprintf("Failed to parse response: %s", err.Error()), errors.ProviderErrorOptions{
 			Provider: "google_ai_studio",
 		})

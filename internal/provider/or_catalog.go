@@ -32,7 +32,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"strconv"
 	"strings"
 	"sync"
@@ -159,19 +158,13 @@ func fetchORCatalogUncached(ctx context.Context, apiKey string) ([]ORModelMetada
 		headers["Authorization"] = "Bearer " + apiKey
 	}
 
-	resp, err := ProviderFetch(ctx, "openrouter", ORModelsURL, "GET", headers, nil, 30000)
+	status, body, err := ProviderFetchBytes(ctx, "openrouter", ORModelsURL, "GET", headers, nil, 30000)
 	if err != nil {
 		return nil, fmt.Errorf("openrouter catalog fetch: %w", err)
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("openrouter catalog fetch failed (status %d)", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 50*1024*1024)) // 50MB max
-	if err != nil {
-		return nil, fmt.Errorf("openrouter catalog read: %w", err)
+	if status < 200 || status >= 300 {
+		return nil, fmt.Errorf("openrouter catalog fetch failed (status %d)", status)
 	}
 
 	var payload orCatalogResponse

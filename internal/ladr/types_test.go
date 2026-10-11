@@ -17,9 +17,9 @@
 package ladr_test
 
 import (
-	"strings"
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/ladr/ladr/internal/ladr"
@@ -414,7 +414,7 @@ func TestLoopRefEmptyStringRoundTrip(t *testing.T) {
 		t.Fatalf("from not parsed: %+v", n.From)
 	}
 	if !n.From.LoopRef.IsZero() {
-		t.Fatalf("loopRef \"\" must parse as unset, got %+v", n.From.LoopRef)
+		t.Fatalf("loopRef empty must parse as unset, got %+v", n.From.LoopRef)
 	}
 
 	out, err := json.Marshal(n)
@@ -471,5 +471,18 @@ func TestValidateStepModelsAgainstAllowedTargets(t *testing.T) {
 		if strings.Contains(e, "model") {
 			t.Fatalf("allowed step model must not error; errors=%v", res2.Errors)
 		}
+	}
+}
+
+func TestFieldSourceRefAbsentLoopRefDefaultsToCurrent(t *testing.T) {
+	// Authoring default: `from: { stepId: x }` without a loopRef resolves
+	// the zero LoopRef to nothing at runtime — the parser must default it
+	// to "current" so natural one-liner sources work.
+	var n ladr.IngestField
+	if err := json.Unmarshal([]byte(`{"name":"F","type":"ingest","from":{"stepId":"s0"}}`), &n); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if n.From.LoopRef.Kind != ladr.LoopRefString || n.From.LoopRef.Str != "current" {
+		t.Fatalf("absent loopRef must default to current, got %+v", n.From.LoopRef)
 	}
 }

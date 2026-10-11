@@ -1,4 +1,4 @@
-// LADR - the programming layer for inference-time reasoning.
+// Redeo - the programming layer for inference-time reasoning.
 // Copyright (C) 2026  Redeo Labs Inc.
 //
 // This program is free software: you can redistribute it and/or modify
@@ -547,6 +547,18 @@ func extractKnobReference(value string) (string, bool) {
 	return match[1], true
 }
 
+var stepOutputRefRegex = regexp.MustCompile(`^\{\{(.+)\.output\}\}$`)
+
+// ParseStepOutputRef extracts the step ID from "{{X.output}}", or returns
+// ("", false). Validation-side twin of the engine's ParseStepOutputReference.
+func ParseStepOutputRef(value string) (string, bool) {
+	match := stepOutputRefRegex.FindStringSubmatch(value)
+	if match == nil {
+		return "", false
+	}
+	return match[1], true
+}
+
 func validateRecursion(steps []Step, knobs map[string]Knob, errors *[]string) {
 	nonGroupSteps := flattenNonGroupSteps(steps)
 	recursionCount := 0
@@ -558,6 +570,14 @@ func validateRecursion(steps []Step, knobs map[string]Knob, errors *[]string) {
 					*errors = append(*errors,
 						`Step "`+step.ID+`": nodes references non-existent knob "`+ref+`"`)
 				}
+			} else if _, ok := ParseStepOutputRef(step.Nodes.Str); !ok {
+				// A bare string like `nodes: attempts` parses fine and then
+				// resolves to ONE node at runtime with no error and no event
+				// — a fan-out ladder silently serialized. Reject it here,
+				// where it costs nothing.
+				*errors = append(*errors,
+					`Step "`+step.ID+`": nodes string "`+step.Nodes.Str+
+						`" is neither a knob reference {{knobs.X}} nor a step-output reference {{X.output}} (a bare name silently resolves to 1 node)`)
 			}
 		}
 

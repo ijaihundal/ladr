@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"strings"
 
 	"github.com/ladr/ladr/pkg/errors"
@@ -136,7 +135,7 @@ func (a *anthropicAdapter) Call(ctx context.Context, model string, messages []Me
 	}
 	url := trimTrailingSlash(baseURL) + "/v1/messages"
 
-	resp, err := ProviderFetch(ctx, "anthropic", url, "POST", map[string]string{
+	status, respBody, err := ProviderFetchBytes(ctx, "anthropic", url, "POST", map[string]string{
 		"content-type":      "application/json",
 		"x-api-key":         config.APIKey,
 		"anthropic-version": "2023-06-01",
@@ -144,16 +143,14 @@ func (a *anthropicAdapter) Call(ctx context.Context, model string, messages []Me
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
+	if status < 200 || status >= 300 {
 		return nil, errors.NewProviderError(
-			fmt.Sprintf("anthropic call failed (%d): %s", resp.StatusCode, string(respBody)),
+			fmt.Sprintf("anthropic call failed (%d): %s", status, string(respBody)),
 			errors.ProviderErrorOptions{
 				Provider:   "anthropic",
-				StatusCode: resp.StatusCode,
-				Retryable:  IsRetryableHttpStatus(resp.StatusCode),
+				StatusCode: status,
+				Retryable:  IsRetryableHttpStatus(status),
 			},
 		)
 	}
@@ -168,7 +165,7 @@ func (a *anthropicAdapter) Call(ctx context.Context, model string, messages []Me
 			OutputTokens *int `json:"output_tokens"`
 		} `json:"usage"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&json_payload); err != nil {
+	if err := json.Unmarshal(respBody, &json_payload); err != nil {
 		return nil, errors.NewProviderError(fmt.Sprintf("Failed to parse response: %s", err.Error()), errors.ProviderErrorOptions{
 			Provider: "anthropic",
 		})
